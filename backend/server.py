@@ -1,24 +1,31 @@
 from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import json
 import re
+import base64
 import uuid
 from pathlib import Path
 from pydantic import BaseModel
 from datetime import datetime, timezone
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+import anthropic
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Optional MongoDB — if MONGO_URL is set, audit logs are saved; if not, app still works
+mongo_enabled = False
+db = None
+try:
+    if os.environ.get('MONGO_URL'):
+        from motor.motor_asyncio import AsyncIOMotorClient
+        client = AsyncIOMotorClient(os.environ['MONGO_URL'])
+        db = client[os.environ.get('DB_NAME', 'tss_fraud_detector')]
+        mongo_enabled = True
+except Exception as e:
+    print(f"MongoDB not available, audit logging disabled: {e}")
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -84,30 +91,44 @@ def calculate_fraud_risk_score(verdict, confidence):
 @api_router.post("/analyze")
 async def analyze_image(request: AnalyzeRequest):
     try:
-        llm_key = os.environ.get('EMERGENT_LLM_KEY')
-        if not llm_key:
-            return {"error": "Analysis engine not configured. EMERGENT_LLM_KEY is missing."}
+        api_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not api_key:
+            return {"error": "ANTHROPIC_API_KEY is not configured on the server."}
 
-        chat = LlmChat(
-            api_key=llm_key,
-            session_id=f"tss-{uuid.uuid4()}",
-            system_message="You are a digital forensics image analyst for Lenovo TSS."
-        ).with_model("anthropic", "claude-sonnet-4-6")
+        # Use official Anthropic SDK
+        anthropic_client = anthropic.Anthropic(api_key=api_key)
 
-        image_content = ImageContent(image_base64=request.image_base64)
-
-        user_message = UserMessage(
-            text=FORENSICS_PROMPT,
-            file_contents=[image_content]
+        message = anthropic_client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1000,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": request.media_type,
+                                "data": request.image_base64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": FORENSICS_PROMPT
+                        }
+                    ],
+                }
+            ],
         )
 
-        response = await chat.send_message(user_message)
-        logger.info(f"Claude response length: {len(response)}")
+        response_text = message.content[0].text
+        logger.info(f"Claude response length: {len(response_text)}")
 
-        json_match = re.search(r'\{[\s\S]*\}', response)
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
         if not json_match:
-            logger.error(f"No JSON found in Claude response: {response[:500]}")
-            return {"error": "Failed to parse analysis response from Claude."}
+            logger.error(f"No JSON found in Claude response: {response_text[:500]}")
+            return {"error": f"Failed to parse analysis response. Got: {response_text[:200]}"}
 
         analysis = json.loads(json_match.group())
 
@@ -130,13 +151,22 @@ async def analyze_image(request: AnalyzeRequest):
             "analyzedAt": analyzed_at
         }
 
-        audit_doc = {**result, "media_type": request.media_type, "stored_at": analyzed_at}
-        await db.analyses.insert_one(audit_doc)
+        # Save audit log to MongoDB only if available
+        if mongo_enabled and db is not None:
+            try:
+                audit_doc = {**result, "media_type": request.media_type, "stored_at": analyzed_at}
+                await db.analyses.insert_one(audit_doc)
+            except Exception as mongo_err:
+                logger.warning(f"Audit log failed (non-fatal): {mongo_err}")
 
         return result
 
     except json.JSONDecodeError as e:
         return {"error": f"Failed to parse Claude response as JSON: {str(e)}"}
+    except anthropic.AuthenticationError:
+        return {"error": "Invalid Anthropic API key. Check your ANTHROPIC_API_KEY environment variable."}
+    except anthropic.RateLimitError:
+        return {"error": "Anthropic rate limit reached. Please wait a moment and try again."}
     except Exception as e:
         logger.error(f"Analysis error: {str(e)}")
         return {"error": str(e)}
@@ -149,7 +179,11 @@ async def root():
 
 @api_router.get("/health")
 async def health():
-    return {"status": "healthy", "service": "TSS Image Fraud Detector"}
+    return {
+        "status": "healthy",
+        "service": "TSS Image Fraud Detector",
+        "mongo": "connected" if mongo_enabled else "disabled"
+    }
 
 
 app.include_router(api_router)
@@ -165,4 +199,5 @@ app.add_middleware(
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    if mongo_enabled:
+        client.close()
