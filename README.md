@@ -159,6 +159,3 @@ Former Apple Genius · Epic Games Unreal Support
 
 ---
 
----
-
-*Lenovo Premier Technical Support · TSS Fraud Detection Tools · [lenovo.com/us/en/premier-support](https://www.lenovo.com/us/en/premier-support)*
