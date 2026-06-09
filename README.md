@@ -1,4 +1,4 @@
-# 🔍 TSS Image Fraud Detector
+# 🔍 Image Fraud Detector
 
 **Lenovo Premier Support · AI Forensic Analysis Engine · v1.0**
 
@@ -158,10 +158,6 @@ Former Apple Genius · Epic Games Unreal Support
 [GitHub](https://github.com/Jefferz58) · [LinkedIn](https://linkedin.com/in/jefferz58)
 
 ---
-
-## 🙏 Credit
-
-Concept inspired by a real internal fraud alert issued by the Lenovo Premier Support TAM team, April 2026. Special thanks to **Gio Bass** for the original observation, and **Dawn Bash** and **Chris Shover** for documenting and escalating the pattern that made this tool necessary.
 
 ---
 
